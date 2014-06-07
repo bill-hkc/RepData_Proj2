@@ -1,17 +1,96 @@
 Title
 ========================================================
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring web pages (click the **Help** toolbar button for more details on using R Markdown).
+## Synopsis
 
-When you click the **Knit HTML** button a web page will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+## Data Processing
+First the raw file is downloaded from the URL, then it is read into memory and converted to a data.table to speedup further operations.
 
-```{r}
-summary(cars)
+```{r download_and_read_file, cache=TRUE}
+library(data.table)
+#library(R.utils)
+#library(cluster)
+url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+local.file <- "StormData.csv.bz2"
+local.csv <- "StormData.csv"
+# download file
+if (!file.exists(local.file)) {
+  download.file(url, local.file, method="curl", mode="wb")  
+}
+# read data
+df <- read.csv(local.file)
+dt <- data.table(df)
+```
+Next we check the columns of interest.  The column names are listed below. 
+
+* FATALITIES and INJURIES contain the number of people harmed.  
+* PROPDMG and PROPDMGEXP represent the significant and exponent of ???? damage.  
+* The columns CROPDMG and CROPDMGEXP represent the significant and exponent of ???? damage.
+* EVTYPE is the type of event
+```{r column_names}
+names(dt)
+```
+To get the correct value of damage, we need to combine the effect of exponent.  The two exponents inlucde integers and shorthand symbols such as K, M, etc.  They also include some invalid symbols.  We convert the exponents to uppercase and create new columns for the damage values.  For exponents of valid symbols (B, M, K) or numeric values, we apply corresponding scaling.  For invalid exponents, no scaling is applied to the damage value.  At last we show the effect of the exponent in two examples.
+
+```{r cleanup_damage}
+dt[,table(PROPDMGEXP)]
+dt[,table(CROPDMGEXP)]
+
+#define a helper function to convert damage exponent
+convert.dmg <- function(significant, exponent, output){
+  # change exponent column to upper case
+  dt[, exponent := toupper(get(exponent)), with = FALSE]
+  # add a new column for output
+  dt[, output := get(significant), with = FALSE]
+  # apply symbol exponents
+  dt[dt[[exponent]] == "B", output := get(significant) * 1e9, with=FALSE]
+  dt[dt[[exponent]] == "M", output := get(significant) * 1e6, with=FALSE]  
+  dt[dt[[exponent]] == "K", output := get(significant) * 1e3, with=FALSE]  
+  # apply integer exponents
+  dt[!is.na(as.numeric(dt[[exponent]])), 
+     output := get(significant) * 10^as.numeric(get(exponent)), with=FALSE]  
+}
+
+convert.dmg("PROPDMG","PROPDMGEXP","prop.dmg")
+convert.dmg("CROPDMG","CROPDMGEXP","crop.dmg")
+
+head(dt[PROPDMGEXP == "B", list(PROPDMG, PROPDMGEXP, prop.dmg)])
+head(dt[PROPDMGEXP == "5", list(PROPDMG, PROPDMGEXP, prop.dmg)])
 ```
 
-You can also embed plots, for example:
+We also need to cleanup the event types.  As an intial step, we convert it to all upper case and trim white space.  
 
-```{r fig.width=7, fig.height=6}
-plot(cars)
+```{r cleanup_evtype_year}
+library(stringr)
+dt[, EVTYPE := toupper(str_trim(EVTYPE))]
+```
+
+## Results
+For intial analysis, we make a summary of persons harmed and total damage per event type.  Then the top 10 events with most serious impact are listed below.
+```{r init_analysis}
+cols.summary <- c("FATALITIES","INJURIES","prop.dmg","crop.dmg")
+summary.event<- dt[,lapply(.SD,sum), by=EVTYPE, 
+               .SDcols=cols.summary]
+# calculate total persons harmed and total damage
+summary.event[,persons.harmed:=FATALITIES+INJURIES]
+summary.event[,total.damage:=prop.dmg+crop.dmg]
+# list top10
+summary.event[order(persons.harmed, decreasing=T)[1:10],
+              list(EVTYPE,persons.harmed)]
+summary.event[order(total.damage, decreasing=T)[1:10],
+              list(EVTYPE, total.damage)]
+```
+
+There are only 48 event types defined in the document[1], but the EVTYPE from data file contains several hundreds of types.  We will try to find an official type close to the EVTYPE.
+
+```{r list_evtype}
+dt[, length(unique(toupper(EVTYPE)))]
+
+event_names <- unlist(fread("event_name.csv"),use.name=F)
+event_names
+```
+
+First look the official types.  It is listed in the document [1] and stored in an accompanised file.  A few items cotain two phrases, such as "Hurricane (Typhoon)" or "Frost/Freeze".  We will add more types with splitted phrases.
+
 ```
 
